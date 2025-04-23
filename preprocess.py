@@ -3,8 +3,7 @@
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-def preprocess_data(df):
-    # Clean and compute RFM
+def compute_rfm(df):
     df = df[df['Quantity'] > 0]
     df['TotalAmount'] = df['Quantity'] * df['UnitPrice']
     df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'], errors='coerce')
@@ -19,10 +18,19 @@ def preprocess_data(df):
     }).reset_index()
 
     rfm.columns = ['CustomerID', 'Recency', 'Frequency', 'Monetary']
+    return rfm
 
-    # Scale RFM
+
+def clean_and_preprocess(df):
+    rfm = compute_rfm(df)
+    Q1 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.25)
+    Q3 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.75)
+    IQR = Q3 - Q1
+    rfm = rfm[~((rfm < (Q1 - 1.5 * IQR)) | (rfm > (Q3 + 1.5 * IQR))).any(axis=1)]
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(rfm[['Recency', 'Frequency', 'Monetary']])
-    
-    return X_scaled, rfm, scaler
+
+    return rfm, X_scaled, scaler
+
 

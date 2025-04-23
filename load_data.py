@@ -1,4 +1,4 @@
-# 1. pythong load_data.py
+# 1. load_data.py
 
 import pandas as pd
 

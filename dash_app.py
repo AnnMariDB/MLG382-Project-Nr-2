@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score
 import plotly.express as px
 import plotly.io as pio
@@ -12,11 +12,14 @@ import io
 
 app = Dash(__name__, external_stylesheets=["https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"])
 app.title = 'Customer Segmentation (RFM)'
+
 server = app.server
 
 df_global = None
 model_global = None
 scaler_global = None
+best_model_name = None
+model_scores_df = None
 
 def save_figure(fig, filename):
     pio.write_image(fig, filename, format='png')
@@ -40,7 +43,28 @@ app.layout = html.Div([
             html.Div(id='file-upload-output', className="mb-4"),
         ]),
 
-        html.H3("2. Predict Customer Segment", className="text-secondary"),
+        html.H3("2. Cluster Visualizations", className="text-secondary"),
+        dcc.Tabs(id='charts-tabs', value='scatter', children=[
+            dcc.Tab(label='RFM Scatter Plot', value='scatter'),
+            dcc.Tab(label='Cluster Distribution Pie', value='pie'),
+            dcc.Tab(label='Monetary by Cluster', value='bar'),
+            dcc.Tab(label='Frequency vs Recency', value='freq_rec'),
+            dcc.Tab(label='Model Comparison', value='comparison')
+        ]),
+        html.Div([
+            dcc.Graph(id='cluster-plot'),
+            html.Button('Download Chart', id='download-btn', className="btn btn-outline-secondary mt-2 me-2"),
+            html.Button('Download RFM Table', id='download-table-btn', className="btn btn-outline-success mt-2"),
+            html.Div(id='download-message', className="text-muted mt-1")
+        ]),
+
+        html.H3("3. RFM Table Preview", className="text-secondary mt-4"),
+        dash_table.DataTable(id='data-preview', page_size=10, style_table={'overflowX': 'auto'}),
+
+        html.Br(),
+        html.Div(id='model-metrics', className="text-muted"),
+
+        html.H3("4. Predict Customer Segment", className="text-secondary mt-5"),
         html.P("Enter RFM values for a new customer below to predict their segment.", className="fst-italic"),
         html.Ul([
             html.Li("Recency: Days since their last purchase (e.g., 7)"),
@@ -53,27 +77,7 @@ app.layout = html.Div([
             dcc.Input(id='monetary-input', type='number', placeholder='Monetary ($)', className="form-control mt-2"),
             html.Button('Predict Segment', id='predict-button', n_clicks=0, className="btn btn-primary mt-2"),
             html.Div(id='prediction-output', className="mt-2 text-success fw-bold")
-        ], className="mb-5"),
-
-        html.H3("3. Cluster Visualizations", className="text-secondary"),
-        dcc.Tabs(id='charts-tabs', value='scatter', children=[
-            dcc.Tab(label='RFM Scatter Plot', value='scatter'),
-            dcc.Tab(label='Cluster Distribution Pie', value='pie'),
-            dcc.Tab(label='Monetary by Cluster', value='bar'),
-            dcc.Tab(label='Frequency vs Recency', value='freq_rec')
-        ]),
-        html.Div([
-            dcc.Graph(id='cluster-plot'),
-            html.Button('Download Chart', id='download-btn', className="btn btn-outline-secondary mt-2 me-2"),
-            html.Button('Download RFM Table', id='download-table-btn', className="btn btn-outline-success mt-2"),
-            html.Div(id='download-message', className="text-muted mt-1")
-        ]),
-
-        html.H3("4. RFM Table Preview", className="text-secondary mt-4"),
-        dash_table.DataTable(id='data-preview', page_size=10, style_table={'overflowX': 'auto'}),
-
-        html.Br(),
-        html.Div(id='model-metrics', className="text-muted")
+        ], className="mb-5")
     ], className="container")
 ])
 
@@ -103,11 +107,26 @@ def clean_and_preprocess(df):
     X_scaled = scaler.fit_transform(rfm[['Recency', 'Frequency', 'Monetary']])
     return rfm, X_scaled, scaler
 
-def train_kmeans(X_scaled, k=4):
-    model = KMeans(n_clusters=k, random_state=42, n_init=10)
-    labels = model.fit_predict(X_scaled)
-    score = silhouette_score(X_scaled, labels)
-    return model, labels, score
+def evaluate_models(X_scaled):
+    global model_scores_df
+
+    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+    kmeans_labels = kmeans.fit_predict(X_scaled)
+    kmeans_score = silhouette_score(X_scaled, kmeans_labels)
+
+    dbscan = DBSCAN(eps=0.9, min_samples=5)
+    dbscan_labels = dbscan.fit_predict(X_scaled)
+    dbscan_score = silhouette_score(X_scaled, dbscan_labels) if len(set(dbscan_labels)) > 1 else -1
+
+    model_scores_df = pd.DataFrame({
+        'Model': ['KMeans', 'DBSCAN'],
+        'Silhouette Score': [kmeans_score, dbscan_score]
+    })
+
+    if kmeans_score >= dbscan_score:
+        return kmeans, kmeans_labels, kmeans_score, "KMeans"
+    else:
+        return dbscan, dbscan_labels, dbscan_score, "DBSCAN"
 
 @app.callback(
     Output('file-upload-output', 'children'),
@@ -118,7 +137,8 @@ def train_kmeans(X_scaled, k=4):
     State('upload-data', 'filename')
 )
 def handle_upload(contents, filename):
-    global df_global, model_global, scaler_global
+    global df_global, model_global, scaler_global, best_model_name
+
     if contents is None:
         return "No file uploaded", [], [], ""
 
@@ -130,8 +150,8 @@ def handle_upload(contents, filename):
         df = pd.read_csv(io.StringIO(decoded.decode('ISO-8859-1')))
 
     df_clean, X_scaled, scaler = clean_and_preprocess(df)
-    model, clusters, silhouette = train_kmeans(X_scaled)
-    df_clean['Cluster'] = clusters
+    model, labels, silhouette, best_model_name = evaluate_models(X_scaled)
+    df_clean['Cluster'] = labels
     df_clean.to_csv('predicted_clusters.csv', index=False)
 
     df_global = df_clean
@@ -139,8 +159,7 @@ def handle_upload(contents, filename):
     scaler_global = scaler
 
     columns = [{'name': i, 'id': i} for i in df_clean.columns]
-    metrics = f"Model trained | Silhouette Score: {silhouette:.2f} | Data saved to 'predicted_clusters.csv'"
-
+    metrics = f"Best Model: {best_model_name} | Silhouette Score: {silhouette:.2f}"
     return f"Processed '{filename}'", df_clean.to_dict('records'), columns, metrics
 
 @app.callback(
@@ -161,6 +180,9 @@ def update_chart(chart_type):
     elif chart_type == 'freq_rec':
         return px.scatter(df_global, x='Frequency', y='Recency', color='Cluster',
                           title='Frequency vs Recency by Cluster')
+    elif chart_type == 'comparison':
+        if model_scores_df is not None:
+            return px.bar(model_scores_df, x='Model', y='Silhouette Score', title='Model Performance Comparison', text='Silhouette Score')
     return {}
 
 @app.callback(
@@ -197,8 +219,8 @@ def download_table(n_clicks):
 def predict_cluster(n_clicks, recency, frequency, monetary):
     if n_clicks == 0 or None in (recency, frequency, monetary):
         return ""
-    if model_global is None or scaler_global is None:
-        return "Please upload a dataset first."
+    if model_global is None or scaler_global is None or not hasattr(model_global, 'predict'):
+        return "Model not ready or unsupported for prediction."
     try:
         input_df = pd.DataFrame([[recency, frequency, monetary]], columns=['Recency', 'Frequency', 'Monetary'])
         input_scaled = scaler_global.transform(input_df)
@@ -209,6 +231,7 @@ def predict_cluster(n_clicks, recency, frequency, monetary):
 
 #if __name__ == '__main__':
 #    app.run(debug=True)
+
 
 # Run Server: Render
 if __name__ == "__main__":
