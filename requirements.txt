@@ -1,5 +1,9 @@
-dash
-pandas
-scikit-learn
-plotly
-kaleido
+dash==2.17.0
+dash-bootstrap-components==1.5.0
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.6.1
+plotly==5.21.0
+kaleido==0.2.1
+joblib==1.4.0
+gunicorn==21.2.0
