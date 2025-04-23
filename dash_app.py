@@ -12,7 +12,6 @@ import io
 
 app = Dash(__name__, external_stylesheets=["https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"])
 app.title = 'Customer Segmentation (RFM)'
-
 server = app.server
 
 df_global = None
@@ -208,6 +207,10 @@ def predict_cluster(n_clicks, recency, frequency, monetary):
     except Exception as e:
         return f"Prediction error: {e}"
 
-if __name__ == '__main__':
-    app.run(debug=True)
+#if __name__ == '__main__':
+#    app.run(debug=True)
 
+# Run Server: Render
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8050))  # Default to 8050 for local dev
+    app.run(host="0.0.0.0", port=port, debug=False)
