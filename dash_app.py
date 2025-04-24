@@ -7,19 +7,17 @@ from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score
 import plotly.express as px
 import plotly.io as pio
-from dash import Dash, dcc, html, Input, Output, State, dash_table, ctx
+from dash import Dash, dcc, html, Input, Output, State, dash_table
 import dash
 import base64
 import io
-import json
-import flask
 
 app = Dash(__name__, external_stylesheets=["https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"])
 app.title = 'Customer Segmentation (RFM)'
 
 server = app.server
 
-# Global state
+# Global store
 store = {
     "df": None,
     "model": None,
@@ -45,12 +43,15 @@ def compute_rfm(df):
 
 def clean_and_preprocess(df):
     rfm = compute_rfm(df)
-    Q1 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.25)
-    Q3 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.75)
+    rfm_features = ['Recency', 'Frequency', 'Monetary']
+    Q1 = rfm[rfm_features].quantile(0.25)
+    Q3 = rfm[rfm_features].quantile(0.75)
     IQR = Q3 - Q1
-    rfm = rfm[~((rfm < (Q1 - 1.5 * IQR)) | (rfm > (Q3 + 1.5 * IQR))).any(axis=1)]
+    filter_mask = ~((rfm[rfm_features] < (Q1 - 1.5 * IQR)) | (rfm[rfm_features] > (Q3 + 1.5 * IQR))).any(axis=1)
+    rfm = rfm[filter_mask]
+
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(rfm[['Recency', 'Frequency', 'Monetary']])
+    X_scaled = scaler.fit_transform(rfm[rfm_features])
     return rfm, X_scaled, scaler
 
 def evaluate_models(X_scaled):
@@ -91,6 +92,7 @@ def get_chart_figure(chart_type):
         return px.bar(store['model_scores_df'], x='Model', y='Silhouette Score', title='Model Performance Comparison', text='Silhouette Score')
     return {}
 
+# App layout
 app.layout = html.Div([
     dcc.Download(id="download-table"),
     dcc.Download(id="download-image"),
@@ -151,6 +153,7 @@ app.layout = html.Div([
     ], className="container")
 ])
 
+# File upload and processing
 @app.callback(
     Output('file-upload-output', 'children'),
     Output('data-preview', 'data'),
@@ -184,6 +187,7 @@ def handle_upload(contents, filename):
     metrics = f"Best Model: {best_model_name} | Silhouette Score: {silhouette:.2f}"
     return f"Processed '{filename}'", df_clean.to_dict('records'), columns, metrics
 
+# Update graphs
 @app.callback(
     Output('cluster-plot', 'figure'),
     Input('charts-tabs', 'value')
@@ -191,6 +195,7 @@ def handle_upload(contents, filename):
 def update_chart(chart_type):
     return get_chart_figure(chart_type)
 
+# Download image
 @app.callback(
     Output("download-image", "data"),
     Input("download-btn", "n_clicks"),
@@ -201,6 +206,7 @@ def trigger_image_download(n, chart_type):
     fig = get_chart_figure(chart_type)
     return dcc.send_bytes(fig.to_image(format="png"), filename=f"chart_{chart_type}.png")
 
+# Download CSV
 @app.callback(
     Output("download-table", "data"),
     Input("download-table-btn", "n_clicks"),
@@ -211,6 +217,7 @@ def trigger_csv_download(n_clicks):
         return dcc.send_data_frame(store['df'].to_csv, "rfm_export.csv")
     return dash.no_update
 
+# Prediction
 @app.callback(
     Output('prediction-output', 'children'),
     Input('predict-button', 'n_clicks'),
@@ -231,16 +238,16 @@ def predict_cluster(n_clicks, recency, frequency, monetary):
     except Exception as e:
         return f"Prediction error: {e}"
 
-# Run Server: Render
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8050))
-    app.run(host="0.0.0.0", port=port, debug=False)
+# Run the server (Render compatible)
+#if __name__ == "__main__":
+#    port = int(os.environ.get("PORT", 8050))
+#    app.run(host="0.0.0.0", port=port, debug=False)
 
 
 #if __name__ == '__main__':
 #    app.run(debug=True)
 
 # Run Server: Render
-#if __name__ == "__main__":
-#    port = int(os.environ.get("PORT", 8050))  # Default to 8050 for local dev
-#    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8050))  # Default to 8050 for local dev
+    app.run(host="0.0.0.0", port=port, debug=False)
