@@ -1,30 +1,100 @@
 # 7. dash_app.py
 import pandas as pd
 import numpy as np
+import os
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score
 import plotly.express as px
 import plotly.io as pio
-from dash import Dash, dcc, html, Input, Output, State, dash_table
+from dash import Dash, dcc, html, Input, Output, State, dash_table, ctx
+import dash
 import base64
 import io
+import json
+import flask
 
 app = Dash(__name__, external_stylesheets=["https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"])
 app.title = 'Customer Segmentation (RFM)'
 
 server = app.server
 
-df_global = None
-model_global = None
-scaler_global = None
-best_model_name = None
-model_scores_df = None
+# Global state
+store = {
+    "df": None,
+    "model": None,
+    "scaler": None,
+    "best_model_name": None,
+    "model_scores_df": None
+}
 
-def save_figure(fig, filename):
-    pio.write_image(fig, filename, format='png')
+def compute_rfm(df):
+    df = df[df['Quantity'] > 0]
+    df['TotalAmount'] = df['Quantity'] * df['UnitPrice']
+    df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'], errors='coerce')
+    df = df.dropna(subset=['CustomerID', 'InvoiceDate'])
+    df['CustomerID'] = df['CustomerID'].astype(int)
+    latest_date = df['InvoiceDate'].max()
+    rfm = df.groupby('CustomerID').agg({
+        'InvoiceDate': lambda x: (latest_date - x.max()).days,
+        'InvoiceNo': 'nunique',
+        'TotalAmount': 'sum'
+    }).reset_index()
+    rfm.columns = ['CustomerID', 'Recency', 'Frequency', 'Monetary']
+    return rfm
+
+def clean_and_preprocess(df):
+    rfm = compute_rfm(df)
+    Q1 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.25)
+    Q3 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.75)
+    IQR = Q3 - Q1
+    rfm = rfm[~((rfm < (Q1 - 1.5 * IQR)) | (rfm > (Q3 + 1.5 * IQR))).any(axis=1)]
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(rfm[['Recency', 'Frequency', 'Monetary']])
+    return rfm, X_scaled, scaler
+
+def evaluate_models(X_scaled):
+    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+    kmeans_labels = kmeans.fit_predict(X_scaled)
+    kmeans_score = silhouette_score(X_scaled, kmeans_labels)
+
+    dbscan = DBSCAN(eps=0.9, min_samples=5)
+    dbscan_labels = dbscan.fit_predict(X_scaled)
+    dbscan_score = silhouette_score(X_scaled, dbscan_labels) if len(set(dbscan_labels)) > 1 else -1
+
+    model_scores_df = pd.DataFrame({
+        'Model': ['KMeans', 'DBSCAN'],
+        'Silhouette Score': [kmeans_score, dbscan_score]
+    })
+
+    best_model = kmeans if kmeans_score >= dbscan_score else dbscan
+    best_labels = kmeans_labels if kmeans_score >= dbscan_score else dbscan_labels
+    best_score = kmeans_score if kmeans_score >= dbscan_score else dbscan_score
+    best_name = "KMeans" if kmeans_score >= dbscan_score else "DBSCAN"
+
+    return best_model, best_labels, best_score, best_name, model_scores_df
+
+def get_chart_figure(chart_type):
+    df = store['df']
+    if df is None or 'Cluster' not in df.columns:
+        return {}
+
+    if chart_type == 'scatter':
+        return px.scatter(df, x='Recency', y='Monetary', color='Cluster', hover_data=['Frequency'], title='Customer Clusters (RFM)')
+    elif chart_type == 'pie':
+        return px.pie(df, names='Cluster', title='Distribution of Customers by Cluster')
+    elif chart_type == 'bar':
+        return px.bar(df.groupby('Cluster')['Monetary'].sum().reset_index(), x='Cluster', y='Monetary', title='Total Monetary Value per Cluster')
+    elif chart_type == 'freq_rec':
+        return px.scatter(df, x='Frequency', y='Recency', color='Cluster', title='Frequency vs Recency by Cluster')
+    elif chart_type == 'comparison' and store['model_scores_df'] is not None:
+        return px.bar(store['model_scores_df'], x='Model', y='Silhouette Score', title='Model Performance Comparison', text='Silhouette Score')
+    return {}
 
 app.layout = html.Div([
+    dcc.Download(id="download-table"),
+    dcc.Download(id="download-image"),
+
     html.Div([
         html.H1("Customer Segmentation Dashboard", className="text-center text-primary mb-4"),
 
@@ -81,53 +151,6 @@ app.layout = html.Div([
     ], className="container")
 ])
 
-def compute_rfm(df):
-    df = df[df['Quantity'] > 0]
-    df['TotalAmount'] = df['Quantity'] * df['UnitPrice']
-    df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'], errors='coerce')
-    df = df.dropna(subset=['CustomerID', 'InvoiceDate'])
-    df['CustomerID'] = df['CustomerID'].astype(int)
-    latest_date = df['InvoiceDate'].max()
-    rfm = df.groupby('CustomerID').agg({
-        'InvoiceDate': lambda x: (latest_date - x.max()).days,
-        'InvoiceNo': 'nunique',
-        'TotalAmount': 'sum'
-    }).reset_index()
-    rfm.columns = ['CustomerID', 'Recency', 'Frequency', 'Monetary']
-    return rfm
-
-def clean_and_preprocess(df):
-    rfm = compute_rfm(df)
-    Q1 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.25)
-    Q3 = rfm[['Recency', 'Frequency', 'Monetary']].quantile(0.75)
-    IQR = Q3 - Q1
-    rfm = rfm[~((rfm[['Recency', 'Frequency', 'Monetary']] < (Q1 - 1.5 * IQR)) |
-                (rfm[['Recency', 'Frequency', 'Monetary']] > (Q3 + 1.5 * IQR))).any(axis=1)]
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(rfm[['Recency', 'Frequency', 'Monetary']])
-    return rfm, X_scaled, scaler
-
-def evaluate_models(X_scaled):
-    global model_scores_df
-
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-    kmeans_labels = kmeans.fit_predict(X_scaled)
-    kmeans_score = silhouette_score(X_scaled, kmeans_labels)
-
-    dbscan = DBSCAN(eps=0.9, min_samples=5)
-    dbscan_labels = dbscan.fit_predict(X_scaled)
-    dbscan_score = silhouette_score(X_scaled, dbscan_labels) if len(set(dbscan_labels)) > 1 else -1
-
-    model_scores_df = pd.DataFrame({
-        'Model': ['KMeans', 'DBSCAN'],
-        'Silhouette Score': [kmeans_score, dbscan_score]
-    })
-
-    if kmeans_score >= dbscan_score:
-        return kmeans, kmeans_labels, kmeans_score, "KMeans"
-    else:
-        return dbscan, dbscan_labels, dbscan_score, "DBSCAN"
-
 @app.callback(
     Output('file-upload-output', 'children'),
     Output('data-preview', 'data'),
@@ -137,14 +160,6 @@ def evaluate_models(X_scaled):
     State('upload-data', 'filename')
 )
 def handle_upload(contents, filename):
-    global df_global, model_global, scaler_global, best_model_name, model_scores_df
-
-    df_global = None
-    model_global = None
-    scaler_global = None
-    best_model_name = None
-    model_scores_df = None
-
     if contents is None:
         return "No file uploaded", [], [], ""
 
@@ -156,13 +171,14 @@ def handle_upload(contents, filename):
         df = pd.read_csv(io.StringIO(decoded.decode('ISO-8859-1')))
 
     df_clean, X_scaled, scaler = clean_and_preprocess(df)
-    model, labels, silhouette, best_model_name = evaluate_models(X_scaled)
+    model, labels, silhouette, best_model_name, model_scores_df = evaluate_models(X_scaled)
     df_clean['Cluster'] = labels
-    df_clean.to_csv('predicted_clusters.csv', index=False)
 
-    df_global = df_clean
-    model_global = model
-    scaler_global = scaler
+    store['df'] = df_clean
+    store['model'] = model
+    store['scaler'] = scaler
+    store['best_model_name'] = best_model_name
+    store['model_scores_df'] = model_scores_df
 
     columns = [{'name': i, 'id': i} for i in df_clean.columns]
     metrics = f"Best Model: {best_model_name} | Silhouette Score: {silhouette:.2f}"
@@ -173,47 +189,27 @@ def handle_upload(contents, filename):
     Input('charts-tabs', 'value')
 )
 def update_chart(chart_type):
-    if df_global is None or 'Cluster' not in df_global.columns:
-        return {}
-    if chart_type == 'scatter':
-        return px.scatter(df_global, x='Recency', y='Monetary', color='Cluster',
-                          hover_data=['Frequency'], title='Customer Clusters (RFM)')
-    elif chart_type == 'pie':
-        return px.pie(df_global, names='Cluster', title='Distribution of Customers by Cluster')
-    elif chart_type == 'bar':
-        return px.bar(df_global.groupby('Cluster')['Monetary'].sum().reset_index(),
-                      x='Cluster', y='Monetary', title='Total Monetary Value per Cluster')
-    elif chart_type == 'freq_rec':
-        return px.scatter(df_global, x='Frequency', y='Recency', color='Cluster',
-                          title='Frequency vs Recency by Cluster')
-    elif chart_type == 'comparison':
-        if model_scores_df is not None:
-            return px.bar(model_scores_df, x='Model', y='Silhouette Score', title='Model Performance Comparison', text='Silhouette Score')
-    return {}
+    return get_chart_figure(chart_type)
 
 @app.callback(
-    Output('download-message', 'children'),
-    Input('download-btn', 'n_clicks'),
-    State('charts-tabs', 'value')
-)
-def download_chart(n_clicks, chart_type):
-    if n_clicks:
-        fig = update_chart(chart_type)
-        filename = f"exported_{chart_type}.png"
-        save_figure(fig, filename)
-        return f"Chart saved as '{filename}'"
-    return ""
-
-@app.callback(
-    Output('download-message', 'children', allow_duplicate=True),
-    Input('download-table-btn', 'n_clicks'),
+    Output("download-image", "data"),
+    Input("download-btn", "n_clicks"),
+    State("charts-tabs", "value"),
     prevent_initial_call=True
 )
-def download_table(n_clicks):
-    if n_clicks and df_global is not None:
-        df_global.to_csv("rfm_export.csv", index=False)
-        return "RFM table saved as 'rfm_export.csv'"
-    return ""
+def trigger_image_download(n, chart_type):
+    fig = get_chart_figure(chart_type)
+    return dcc.send_bytes(fig.to_image(format="png"), filename=f"chart_{chart_type}.png")
+
+@app.callback(
+    Output("download-table", "data"),
+    Input("download-table-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def trigger_csv_download(n_clicks):
+    if store['df'] is not None:
+        return dcc.send_data_frame(store['df'].to_csv, "rfm_export.csv")
+    return dash.no_update
 
 @app.callback(
     Output('prediction-output', 'children'),
@@ -225,20 +221,26 @@ def download_table(n_clicks):
 def predict_cluster(n_clicks, recency, frequency, monetary):
     if n_clicks == 0 or None in (recency, frequency, monetary):
         return ""
-    if model_global is None or scaler_global is None or not hasattr(model_global, 'predict'):
+    if store['model'] is None or store['scaler'] is None or not hasattr(store['model'], 'predict'):
         return "Model not ready or unsupported for prediction."
     try:
         input_df = pd.DataFrame([[recency, frequency, monetary]], columns=['Recency', 'Frequency', 'Monetary'])
-        input_scaled = scaler_global.transform(input_df)
-        cluster = model_global.predict(input_scaled)[0]
+        input_scaled = store['scaler'].transform(input_df)
+        cluster = store['model'].predict(input_scaled)[0]
         return f"Predicted Segment: Cluster {cluster}"
     except Exception as e:
         return f"Prediction error: {e}"
+
+# Run Server: Render
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8050))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
 
 #if __name__ == '__main__':
 #    app.run(debug=True)
 
 # Run Server: Render
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8050))  # Default to 8050 for local dev
-    app.run(host="0.0.0.0", port=port, debug=False)
+#if __name__ == "__main__":
+#    port = int(os.environ.get("PORT", 8050))  # Default to 8050 for local dev
+#    app.run(host="0.0.0.0", port=port, debug=False)
